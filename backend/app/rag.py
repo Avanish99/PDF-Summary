@@ -6,42 +6,49 @@ from fastapi import UploadFile
 from openai import OpenAI
 
 from app.config import Settings
+import uuid
+
+from app.chunking import chunk_pdf_pages
+from app.embeddings import EmbeddingService
+from app.pdf_loader import load_pages_from_pdf
+from app.vector_search import VectorStoreService
 
 
 class PdfRagService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.client = OpenAI(api_key=settings.openai_api_key)
+        self.embedding_service = EmbeddingService(settings)
+        self.vector_store = VectorStoreService(settings)
 
     def index_pdf(self, upload: UploadFile) -> str:
         suffix = Path(upload.filename or "document.pdf").suffix or ".pdf"
         temporary_path: str | None = None
-        vector_store_id: str | None = None
+    
+        temp_file=tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        document_id = str(uuid.uuid4())
+
 
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temporary:
                 temporary_path = temporary.name
                 while chunk := upload.file.read(1024 * 1024):
                     temporary.write(chunk)
+                
+            loaded_pages = load_pages_from_pdf(temporary_path)
+            chunks = chunk_pdf_pages(
+                document_id=document_id,
+                pages=loaded_pages,
+                chunk_size=self.settings.chunk_size,
+                chunk_overlap=self.settings.chunk_overlap,
 
-            vector_store = self.client.vector_stores.create(
-                name=upload.filename or "PDF document"
             )
-            vector_store_id = vector_store.id
+            embeddings = self.embedding_service.embed_texts([chunk.text for chunk in chunks])
+            self.vector_store.upsert_chunks(chunks=chunks, embeddings=embeddings)
 
-            with open(temporary_path, "rb") as pdf:
-                self.client.vector_stores.files.upload_and_poll(
-                    vector_store_id=vector_store_id,
-                    file=pdf,
-                )
-
-            return vector_store_id
+            return document_id
         except Exception:
-            if vector_store_id:
-                try:
-                    self.client.vector_stores.delete(vector_store_id)
-                except Exception:
-                    pass
+            self.vector_store.delete_document(document_id)
             raise
         finally:
             upload.file.close()
@@ -49,6 +56,19 @@ class PdfRagService:
                 os.remove(temporary_path)
 
     def summarize(self, document_id: str) -> str:
+        matches = self.vector_store.search(
+            document_id=document_id,
+            query_embedding=self.embedding_service.embed_text("Summarize the document."),
+            top_k=20,
+        )
+        if not matches:
+            return "I could not find that in the document. Hence Could not summarize the document."
+        context="\n\n".join(
+            [
+                f"[Page {match['page_number']}, Chunk {match['chunk_index']}]\n{match['text']}"
+                for match in matches
+            ]           
+        )
         response = self.client.responses.create(
             model=self.settings.openai_model,
             instructions=(
@@ -57,6 +77,7 @@ class PdfRagService:
                 "clear Markdown and do not invent facts."
             ),
             input=(
+                f"Document context:\n{context}\n\n"
                 "Summarize this PDF using these sections:\n"
                 "1. Overview\n"
                 "2. Key points\n"
@@ -64,34 +85,42 @@ class PdfRagService:
                 "4. Conclusions\n"
                 "5. Action items, if any"
             ),
-            tools=[
-                {
-                    "type": "file_search",
-                    "vector_store_ids": [document_id],
-                    "max_num_results": 20,
-                }
-            ],
+           
         )
         return response.output_text
 
     def ask(self, document_id: str, question: str) -> str:
+        embedding = self.embedding_service.embed_text(question)
+        matches = self.vector_store.search(
+            document_id=document_id,
+            query_embedding=embedding,
+            top_k=10,
+        )
+        if not matches:
+            return "I could not find that in the document."
+        
+        context = "\n\n".join(
+        [
+            f"[Page {match['page_number']}, Chunk {match['chunk_index']}]\n{match['text']}"
+            for match in matches
+        ]
+    )
         response = self.client.responses.create(
             model=self.settings.openai_model,
             instructions=(
-                "Answer using only information retrieved from the uploaded PDF. "
+               "You are a careful research assistant. Answer using only information retrieved "
+                "from the uploaded PDF. For in-depth questions, synthesize across all relevant "
+                "retrieved sections, compare details when useful, and explain reasoning step by step. "
                 'If the answer is absent, say "I could not find that in the document." '
-                "Do not use outside knowledge or invent details. Return concise Markdown."
+                "Do not use outside knowledge or invent details. Return clear Markdown."
             ),
-            input=question,
-            tools=[
-                {
-                    "type": "file_search",
-                    "vector_store_ids": [document_id],
-                    "max_num_results": 10,
-                }
-            ],
+            input=(
+            f"Document context:\n{context}\n\n"
+            f"Question:\n{question}"
+        ),
+            
         )
         return response.output_text
 
     def delete_document(self, document_id: str) -> None:
-        self.client.vector_stores.delete(document_id)
+        self.vector_store.delete_document(document_id)

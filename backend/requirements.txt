@@ -3,3 +3,6 @@ openai==1.82.1
 pydantic-settings==2.9.1
 python-multipart==0.0.20
 uvicorn[standard]==0.34.3
+pinecone==5.4.2
+pymupdf==1.24.14
+
