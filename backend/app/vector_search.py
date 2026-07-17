@@ -82,9 +82,11 @@ class VectorStoreService:
     def delete_document(self, document_id: str) -> None:
         if not document_id.strip():
             raise ValueError("document_id cannot be empty.")
-
-        self.index.delete(
-            filter={
-                "document_id": {"$eq": document_id},
-            }
-        )
+        try:
+            self.index.delete(
+                filter={
+                    "document_id": {"$eq": document_id},
+                }
+            )
+        except Exception:
+            pass

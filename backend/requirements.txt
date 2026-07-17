@@ -5,4 +5,5 @@ python-multipart==0.0.20
 uvicorn[standard]==0.34.3
 pinecone==5.4.2
 pymupdf==1.24.14
+cohere==5.13.0
 

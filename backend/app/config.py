@@ -4,9 +4,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    openai_api_key: str
-    openai_model: str = "gpt-5.4-mini"
-    openai_embedding_model: str = "text-embedding-3-large"
+    groq_api_key: str
+    groq_model: str = "llama-3.3-70b-versatile"
+    cohere_api_key: str
+    cohere_embedding_model: str = "embed-english-v3.0"
     pinecone_api_key: str
     pinecone_index_name: str
     max_upload_mb: int = 25

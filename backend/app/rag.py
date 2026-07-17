@@ -1,8 +1,9 @@
+import logging
 import os
 import tempfile
 from pathlib import Path
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from openai import OpenAI
 
 from app.config import Settings
@@ -14,10 +15,14 @@ from app.pdf_loader import load_pages_from_pdf
 from app.vector_search import VectorStoreService
 
 
+
 class PdfRagService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.client = OpenAI(api_key=settings.openai_api_key)
+        self.client = OpenAI(
+    api_key=settings.groq_api_key,
+    base_url="https://api.groq.com/openai/v1",
+)
         self.embedding_service = EmbeddingService(settings)
         self.vector_store = VectorStoreService(settings)
 
@@ -25,8 +30,10 @@ class PdfRagService:
         suffix = Path(upload.filename or "document.pdf").suffix or ".pdf"
         temporary_path: str | None = None
     
-        temp_file=tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+
         document_id = str(uuid.uuid4())
+
+        logger = logging.getLogger(__name__)
 
 
         try:
@@ -47,9 +54,16 @@ class PdfRagService:
             self.vector_store.upsert_chunks(chunks=chunks, embeddings=embeddings)
 
             return document_id
-        except Exception:
-            self.vector_store.delete_document(document_id)
-            raise
+        except Exception as e:
+            logger.exception("Document processing failed")
+            try:
+                self.vector_store.delete_document(document_id)
+            except Exception:
+                logger.exception("Failed to cleanup vector store")
+            raise HTTPException(
+        status_code=500,
+        detail="Unable to process document. Please try again later."
+    )
         finally:
             upload.file.close()
             if temporary_path and os.path.exists(temporary_path):
@@ -70,7 +84,7 @@ class PdfRagService:
             ]           
         )
         response = self.client.responses.create(
-            model=self.settings.openai_model,
+            model=self.settings.groq_model,
             instructions=(
                 "You are a precise document summarizer. Use only information retrieved "
                 "from the uploaded PDF. If information is unavailable, say so. Return "
@@ -106,7 +120,7 @@ class PdfRagService:
         ]
     )
         response = self.client.responses.create(
-            model=self.settings.openai_model,
+            model=self.settings.groq_model,
             instructions=(
                "You are a careful research assistant. Answer using only information retrieved "
                 "from the uploaded PDF. For in-depth questions, synthesize across all relevant "
